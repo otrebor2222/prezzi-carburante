@@ -1,4 +1,6 @@
-pandas
+streamlit
 requests
+beautifulsoup4
+pandas
 folium
 streamlit-folium
