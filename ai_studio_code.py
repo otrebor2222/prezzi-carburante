@@ -22,7 +22,7 @@ def load_data():
     'anagrafica': "http://www.mimit.gov.it/images/exportOP/anagrafica_impianti_attivi.csv",
     'prezzi': "http://www.mimit.gov.it/images/exportOP/prezzi_praticati_e_sociali.csv"
 }
-    }
+    
 
     try:
         data = {}
