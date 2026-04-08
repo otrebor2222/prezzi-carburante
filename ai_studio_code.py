@@ -1,96 +1,120 @@
 import streamlit as st
-import pandas as pd
 import requests
-from io import StringIO
+from bs4 import BeautifulSoup
+import pandas as pd
 import folium
 from streamlit_folium import st_folium
+import re
 
-st.set_page_config(page_title="Prezzi Benzina", layout="wide")
+st.set_page_config(page_title="Confronto Prezzi Carburante", layout="wide")
 
-@st.cache_data(ttl=900)
-def load_data():
-    # Header avanzati per ingannare il firewall del Ministero
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Referer': 'https://www.mimit.gov.it/',
-        'Connection': 'keep-alive'
-    }
+# Funzione per estrarre i dati da Komparing
+def scrape_komparing(city, fuel_type):
+    fuel_map = {"Benzina": "prezzo-benzina", "Gasolio": "prezzo-diesel", "GPL": "prezzo-gpl", "Metano": "prezzo-metano"}
+    city_slug = city.lower().replace(" ", "-")
+    url = f"https://www.komparing.com/it/{fuel_map[fuel_type]}/{city_slug}"
     
-    urls = {
-    'anagrafica': "http://www.mimit.gov.it/images/exportOP/anagrafica_impianti_attivi.csv",
-    'prezzi': "http://www.mimit.gov.it/images/exportOP/prezzi_praticati_e_sociali.csv"
-}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
-
     try:
-        data = {}
-        for key, url in urls.items():
-            response = requests.get(url, headers=headers, timeout=30)
-            
-            # Se riceviamo HTML invece di CSV, il sito ci sta bloccando
-            if response.text.strip().startswith('<!DOCTYPE'):
-                st.error(f"Il sito del Ministero ha bloccato la richiesta (Errore: Ricevuto HTML invece di CSV).")
-                st.info("Consiglio: Riprova tra qualche minuto o ricarica la pagina.")
-                return None, None
-            
-            # Trova la riga corretta dell'intestazione
-            lines = response.text.splitlines()
-            start = 0
-            for i, line in enumerate(lines[:20]):
-                if 'idImpianto' in line:
-                    start = i
-                    break
-            
-            df = pd.read_csv(StringIO("\n".join(lines[start:])), sep=';', on_bad_lines='skip', engine='python')
-            df.columns = [str(c).strip() for c in df.columns]
-            data[key] = df
-            
-        return data['anagrafica'], data['prezzi']
-    except Exception as e:
-        st.error(f"Errore di connessione: {e}")
-        return None, None
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            return None
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        stations = []
+        
+        # Cerchiamo i blocchi dei distributori (basato sulla struttura di Komparing)
+        items = soup.find_all('div', class_='list-item') 
+        
+        for item in items:
+            try:
+                # Estrazione Prezzo
+                price_tag = item.find('div', class_='price')
+                price = price_tag.text.strip().replace('€', '').replace(',', '.') if price_tag else "0"
+                
+                # Estrazione Nome e Indirizzo
+                name_tag = item.find('div', class_='name')
+                name = name_tag.text.strip() if name_tag else "Distributore"
+                
+                address_tag = item.find('div', class_='address')
+                address = address_tag.text.strip() if address_tag else ""
+                
+                # Estrazione Coordinate (spesso nei link o attributi)
+                lat, lon = 0.0, 0.0
+                link = item.find('a', href=True)
+                if link:
+                    # Cerchiamo coordinate nel link della mappa
+                    coord_match = re.search(r'q=([-+]?\d*\.\d+|\d+),([-+]?\d*\.\d+|\d+)', link['href'])
+                    if coord_match:
+                        lat, lon = float(coord_match.group(1)), float(coord_match.group(2))
 
-st.title("⛽ Prezzi Carburante Italia")
+                stations.append({
+                    "Prezzo": float(price),
+                    "Marchio": name,
+                    "Indirizzo": address,
+                    "lat": lat,
+                    "lon": lon
+                })
+            except:
+                continue
+        return stations
+    except:
+        return None
 
-df_a, df_p = load_data()
+# --- INTERFACCIA APP ---
+st.markdown(f"<h1 style='text-align: center;'>⛽ Prezzi Carburante a {st.session_state.get('city_input', 'Caltanissetta')}</h1>", unsafe_allow_html=True)
 
-if df_a is not None and df_p is not None:
-    # Cerca colonna provincia
-    col_prov = next((c for c in df_a.columns if 'prov' in c.lower()), None)
+# Sidebar
+st.sidebar.header("Ricerca")
+city = st.sidebar.text_input("Città", "Caltanissetta")
+fuel = st.sidebar.selectbox("Carburante", ["Benzina", "Gasolio", "GPL", "Metano"])
+st.session_state['city_input'] = city
+
+data = scrape_komparing(city, fuel)
+
+if data:
+    df = pd.DataFrame(data).sort_values('Prezzo')
     
-    if col_prov:
-        prov_in = st.sidebar.text_input("Provincia (es: CL, RM, MI)", "CL").upper().strip()
-        carb_in = st.sidebar.selectbox("Carburante", ["Benzina", "Gasolio", "GPL"])
-        
-        # Filtro Provincia
-        df_a_f = df_a[df_a[col_prov].astype(str).str.contains(prov_in, na=False)].copy()
-        
-        if not df_a_f.empty:
-            df_merged = pd.merge(df_a_f, df_p, on='idImpianto')
-            df = df_merged[df_merged['descCarburante'].astype(str).str.contains(carb_in, case=False, na=False)].copy()
-            
-            if not df.empty:
-                df['prezzo'] = pd.to_numeric(df['prezzo'], errors='coerce')
-                df['Latitudine'] = pd.to_numeric(df['Latitudine'], errors='coerce')
-                df['Longitudine'] = pd.to_numeric(df['Longitudine'], errors='coerce')
-                df = df.dropna(subset=['Latitudine', 'Longitudine', 'prezzo']).sort_values('prezzo')
+    # Layout due colonne (come lo screenshot)
+    col_list, col_map = st.columns([1, 1.5])
+    
+    with col_list:
+        st.subheader("Lista Prezzi")
+        for _, row in df.iterrows():
+            # Box colorato per il prezzo
+            st.markdown(f"""
+            <div style="display: flex; justify-content: space-between; align-items: center; 
+                        background: white; padding: 10px; border-radius: 5px; 
+                        border-left: 10px solid #28a745; margin-bottom: 10px; 
+                        box-shadow: 2px 2px 5px rgba(0,0,0,0.1);">
+                <div style="flex-grow: 1;">
+                    <b style="color: #0056b3; font-size: 0.9em; text-transform: uppercase;">{row['Indirizzo']}</b><br>
+                    <span style="color: #666; font-size: 0.8em;">{row['Marchio']}</span>
+                </div>
+                <div style="background: #28a745; color: white; padding: 5px 15px; 
+                            border-radius: 5px; font-weight: bold; font-size: 1.2em;">
+                    {row['Prezzo']:.3f}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
-                # Layout
-                c1, c2 = st.columns([1, 2])
-                with c1:
-                    st.write(f"### 🏆 Più economici ({prov_in})")
-                    for _, r in df.head(10).iterrows():
-                        st.success(f"**{r['prezzo']:.3f}€**\n\n{r['Bandiera']} - {r['Indirizzo']}")
-                with c2:
-                    st.write("### 📍 Mappa")
-                    m = folium.Map(location=[df['Latitudine'].mean(), df['Longitudine'].mean()], zoom_start=11)
-                    for _, r in df.head(40).iterrows():
-                        folium.Marker([r['Latitudine'], r['Longitudine']], popup=f"{r['prezzo']}€").add_to(m)
-                    st_folium(m, width=700, height=500, returned_objects=[])
-            else: st.warning("Nessun prezzo trovato.")
-        else: st.warning(f"Nessun impianto a {prov_in}")
-    else: st.error("Database ministeriale non leggibile al momento.")
+    with col_map:
+        st.subheader("Mappa")
+        # Filtriamo le stazioni che hanno le coordinate
+        map_df = df[df['lat'] != 0]
+        if not map_df.empty:
+            m = folium.Map(location=[map_df['lat'].mean(), map_df['lon'].mean()], zoom_start=13)
+            for _, r in map_df.iterrows():
+                folium.Marker(
+                    [r['lat'], r['lon']], 
+                    popup=f"{r['Marchio']}: {r['Prezzo']}€",
+                    tooltip=f"{r['Prezzo']}€",
+                    icon=folium.Icon(color='green', icon='gas-pump', prefix='fa')
+                ).add_to(m)
+            st_folium(m, width=700, height=600)
+        else:
+            st.warning("Mappa non disponibile per questa città su questo sito.")
+
 else:
-    st.info("Connessione ai server ministeriali... per favore attendi.")
+    st.error("Non ho trovato dati per questa città. Prova a scriverla correttamente (es. Roma, Caltanissetta, Milano).")
