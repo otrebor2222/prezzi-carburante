@@ -19,8 +19,9 @@ def load_data():
     }
     
     urls = {
-        'anagrafica': "https://www.mimit.gov.it/images/exportOP/anagrafica_impianti_attivi.csv",
-        'prezzi': "https://www.mimit.gov.it/images/exportOP/prezzi_praticati_e_sociali.csv"
+    'anagrafica': "http://www.mimit.gov.it/images/exportOP/anagrafica_impianti_attivi.csv",
+    'prezzi': "http://www.mimit.gov.it/images/exportOP/prezzi_praticati_e_sociali.csv"
+}
     }
 
     try:
