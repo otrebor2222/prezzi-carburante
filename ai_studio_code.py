@@ -1,92 +1,108 @@
 import streamlit as st
-import requests
-import re
 import pandas as pd
+import requests
+from io import StringIO
+import folium
+from streamlit_folium import st_folium
 
-st.set_page_config(page_title="Prezzi Benzina", layout="wide")
+st.set_page_config(page_title="Prezzi Carburante Italia", layout="wide", page_icon="⛽")
 
-def get_data_brute_force(city, fuel):
-    # Setup URL
-    fuel_map = {"Gasolio": "prezzo-diesel", "Benzina": "prezzo-benzina", "GPL": "prezzo-gpl"}
-    city_url = city.lower().strip().replace(" ", "-")
-    url = f"https://www.komparing.com/it/{fuel_map[fuel]}/it/{city_url}"
-    
-    # Headers per sembrare un browser reale
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+# --- STILE CSS ---
+st.markdown("""
+    <style>
+    .price-box {
+        background-color: white; padding: 15px; border-radius: 10px; 
+        border-left: 10px solid #28a745; margin-bottom: 10px; 
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.1); display: flex; 
+        justify-content: space-between; align-items: center;
     }
+    .price-value {
+        background: #28a745; color: white; padding: 5px 15px; 
+        border-radius: 5px; font-weight: bold; font-size: 1.3em;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
+# --- FUNZIONE DOWNLOAD ---
+def download_mimit_data():
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'}
     try:
-        response = requests.get(url, headers=headers, timeout=15)
-        html_content = response.text
-        
-        # 1. Cerchiamo tutti i prezzi (formato 1.789 o 1,789)
-        prices = re.findall(r'([12][.,]\d{3})', html_content)
-        
-        # 2. Cerchiamo i nomi dei distributori famosi per dare un contesto
-        brands = ["Eni", "Esso", "IP", "Q8", "Tamoil", "Retitalia", "Enercoop", "Conad", "Costantin", "Beyfin"]
-        
-        # Pulizia prezzi
-        clean_prices = sorted(list(set([float(p.replace(",", ".")) for p in prices])))
-        
-        if clean_prices:
-            results = []
-            for i, p in enumerate(clean_prices[:12]): # Prendiamo i 12 più economici
-                brand = brands[i % len(brands)] # Assegniamo un brand a caso per la demo se non trovato
-                results.append({"Prezzo": p, "Distributore": f"{brand} - Zona {city}"})
-            
-            return pd.DataFrame(results), "OK"
-        
-        return None, "Nessun prezzo trovato nella pagina."
-    except Exception as e:
-        return None, str(e)
+        res_a = requests.get("https://www.mimit.gov.it/images/exportOP/anagrafica_impianti_attivi.csv", headers=headers, timeout=10)
+        res_p = requests.get("https://www.mimit.gov.it/images/exportOP/prezzi_praticati_e_sociali.csv", headers=headers, timeout=10)
+        if res_a.status_code == 200 and res_p.status_code == 200:
+            df_a = pd.read_csv(StringIO(res_a.text), sep=';', skiprows=1, on_bad_lines='skip', engine='python')
+            df_p = pd.read_csv(StringIO(res_p.text), sep=';', skiprows=1, on_bad_lines='skip', engine='python')
+            return df_a, df_p
+    except:
+        return None, None
+    return None, None
 
-# --- INTERFACCIA ---
-st.markdown("<h1 style='text-align: center; color: #004a99;'>⛽ Prezzi Carburante Online</h1>", unsafe_allow_html=True)
+# --- SIDEBAR ---
+st.sidebar.title("⛽ Menu")
+provincia = st.sidebar.text_input("Sigla Provincia", "CL").upper().strip()
+carburante = st.sidebar.selectbox("Carburante", ["Benzina", "Gasolio", "GPL", "Metano"])
 
-with st.sidebar:
-    st.header("Ricerca")
-    citta = st.text_input("Città", "Caltanissetta")
-    tipo = st.selectbox("Carburante", ["Gasolio", "Benzina", "GPL"])
-    st.markdown("---")
-    st.write("L'app scansiona il web per trovare i prezzi più bassi.")
+# --- CARICAMENTO DATI ---
+df_a, df_p = download_mimit_data()
 
-if citta:
-    df, status = get_data_brute_force(citta, tipo)
+# Se il download automatico fallisce (Blocco Server)
+if df_a is None:
+    st.warning("⚠️ Il Ministero ha bloccato la connessione automatica. Carica i file manualmente per procedere.")
+    col_up1, col_up2 = st.columns(2)
+    with col_up1:
+        up_a = st.file_uploader("Carica file ANAGRAFICA (.csv)", type="csv")
+    with col_up2:
+        up_p = st.file_uploader("Carica file PREZZI (.csv)", type="csv")
     
-    if df is not None:
-        st.subheader(f"Migliori prezzi per {tipo} a {citta}")
+    if up_a and up_p:
+        df_a = pd.read_csv(up_a, sep=';', skiprows=1, on_bad_lines='skip', engine='python')
+        df_p = pd.read_csv(up_p, sep=';', skiprows=1, on_bad_lines='skip', engine='python')
+
+# --- ELABORAZIONE E VISUALIZZAZIONE ---
+if df_a is not None and df_p is not None:
+    df_a.columns = [c.strip() for c in df_a.columns]
+    df_p.columns = [c.strip() for c in df_p.columns]
+    
+    # Unione dati
+    df_merged = pd.merge(df_a[df_a['Provincia'] == provincia], df_p, on='idImpianto')
+    df = df_merged[df_merged['descCarburante'].str.contains(carburante, case=False, na=False)].copy()
+    
+    if not df.empty:
+        df['prezzo'] = pd.to_numeric(df['prezzo'], errors='coerce')
+        df = df.dropna(subset=['Latitudine', 'Longitudine', 'prezzo']).sort_values('prezzo')
+
+        st.header(f"Prezzi {carburante} in provincia di {provincia}")
         
-        # Visualizzazione a Card come nello screenshot
-        cols = st.columns(2)
-        for i, (_, row) in enumerate(df.iterrows()):
-            with cols[i % 2]:
+        col_lista, col_mappa = st.columns([1, 1.5])
+        
+        with col_lista:
+            st.write("### 🏆 Più Economici")
+            for _, r in df.head(15).iterrows():
                 st.markdown(f"""
-                <div style="background-color: white; padding: 15px; border-radius: 10px; 
-                            border-left: 10px solid #28a745; margin-bottom: 10px; 
-                            box-shadow: 2px 2px 8px rgba(0,0,0,0.1); display: flex; 
-                            justify-content: space-between; align-items: center;">
-                    <div style="color: #333;">
-                        <b style="font-size: 1.1em; color: #004a99;">{row['Distributore']}</b><br>
-                        <small>Prezzo rilevato nelle ultime 24h</small>
+                <div class="price-box">
+                    <div>
+                        <b style="color:#0056b3;">{r['Bandiera']}</b><br>
+                        <small>{r['Indirizzo']}, {r['Comune']}</small>
                     </div>
-                    <div style="background: #28a745; color: white; padding: 8px 12px; 
-                                border-radius: 5px; font-weight: bold; font-size: 1.4em;">
-                        {row['Prezzo']:.3f}
-                    </div>
+                    <div class="price-value">{r['prezzo']:.3f}</div>
                 </div>
                 """, unsafe_allow_html=True)
+        
+        with col_mappa:
+            st.write("### 📍 Mappa Stazioni")
+            m = folium.Map(location=[df['Latitudine'].mean(), df['Longitudine'].mean()], zoom_start=11)
+            for _, r in df.head(50).iterrows():
+                folium.Marker(
+                    [r['Latitudine'], r['Longitudine']], 
+                    popup=f"{r['Bandiera']}: {r['prezzo']}€",
+                    tooltip=f"{r['prezzo']}€",
+                    icon=folium.Icon(color='green', icon='gas-pump', prefix='fa')
+                ).add_to(m)
+            st_folium(m, width="100%", height=600)
     else:
-        # Se lo scraping automatico fallisce ancora a causa del blocco IP di Streamlit Cloud
-        st.error("Il sito sorgente ha bloccato la connessione automatica del server.")
-        st.warning("⚠️ **SISTEMA DI EMERGENZA ATTIVATO**")
-        st.write("Poiché i server cloud sono bloccati, puoi vedere i prezzi aggiornati cliccando il tasto qui sotto:")
-        
-        fuel_url = {"Gasolio": "prezzo-diesel", "Benzina": "prezzo-benzina", "GPL": "prezzo-gpl"}[tipo]
-        link = f"https://www.komparing.com/it/{fuel_url}/{citta.lower().replace(' ', '-')}"
-        st.link_button(f"Apri Prezzi {tipo} a {citta} su Komparing", link)
-        
-        st.info("💡 **Consiglio professionale:** Per evitare questi blocchi, dovresti far girare l'app sul tuo computer locale (Mac) invece che su Streamlit Cloud. In locale, il sito vedrà il tuo indirizzo IP di casa e non ti bloccherà.")
+        st.error("Nessun dato trovato per questa provincia. Controlla la sigla (es. MI, RM, CL).")
 
-st.markdown("---")
-st.caption("Dati estratti tramite scansione testuale. Soggetti a variazioni.")
+else:
+    st.info("Scarica i file dal sito del Ministero e caricali qui per vedere la mappa interattiva.")
+    st.link_button("Scarica Anagrafica (CSV)", "https://www.mimit.gov.it/images/exportOP/anagrafica_impianti_attivi.csv")
+    st.link_button("Scarica Prezzi (CSV)", "https://www.mimit.gov.it/images/exportOP/prezzi_praticati_e_sociali.csv")
