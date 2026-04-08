@@ -4,115 +4,96 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import re
 
-# Configurazione Pagina
-st.set_page_config(page_title="Prezzi Benzina & Diesel", layout="wide")
+st.set_page_config(page_title="Prezzi Benzina", layout="wide")
 
-def get_fuel_data(city, fuel_type):
-    # Mapping carburante per l'URL
-    fuel_map = {
-        "Gasolio": "prezzo-diesel",
-        "Benzina": "prezzo-benzina",
-        "GPL": "prezzo-gpl",
-        "Metano": "prezzo-metano"
-    }
+def fetch_data(city, fuel):
+    # Trasformiamo i nomi per l'URL
+    fuel_url = {"Gasolio": "prezzo-diesel", "Benzina": "prezzo-benzina", "GPL": "prezzo-gpl"}[fuel]
+    city_url = city.lower().replace(" ", "-")
+    url = f"https://www.komparing.com/it/{fuel_url}/{city_url}"
     
-    city_slug = city.lower().strip().replace(" ", "-")
-    url = f"https://www.komparing.com/it/{fuel_map[fuel_type]}/{city_slug}"
-    
-    # Header più "umani" per evitare blocchi
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://www.google.com/"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+        "Accept-Language": "it-IT,it;q=0.9"
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=15)
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
-            return None, f"Errore Sito: {response.status_code}"
+            return None, f"Sito non raggiungibile (Errore {response.status_code})"
 
         soup = BeautifulSoup(response.text, 'html.parser')
-        stations = []
-
-        # --- STRATEGIA 1: Cerca tabelle ---
+        
+        # Cerchiamo tutti i blocchi che contengono un prezzo (es. 1.745 o 1,745)
+        results = []
+        
+        # Cerchiamo dentro le tabelle, che sono le più comuni
         for row in soup.find_all('tr'):
-            cells = row.find_all('td')
-            if len(cells) >= 2:
-                text = row.get_text(" ", strip=True).replace(",", ".")
-                # Cerca il prezzo (formato X.XXX)
-                price_match = re.search(r'(\d\.\d{3})', text)
-                if price_match:
-                    stations.append({
-                        "Prezzo": float(price_match.group(1)),
-                        "Nome": cells[0].get_text(" ", strip=True)[:60],
-                        "Indirizzo": cells[1].get_text(" ", strip=True) if len(cells) > 2 else ""
-                    })
+            text = row.get_text(" ", strip=True).replace(",", ".")
+            # Cerchiamo un prezzo nel testo
+            match = re.search(r'(\d\.\d{3})', text)
+            if match:
+                results.append({
+                    "Prezzo": float(match.group(1)),
+                    "Dettaglio": text.replace(match.group(1), "").strip()[:80]
+                })
 
-        # --- STRATEGIA 2: Cerca blocchi div (se la tabella fallisce) ---
-        if not stations:
-            # Cerchiamo blocchi che contengono prezzi
-            for div in soup.find_all(['div', 'li']):
-                text = div.get_text(" ", strip=True).replace(",", ".")
-                price_match = re.search(r'(\d\.\d{3})', text)
-                if price_match and len(text) < 200: # Evitiamo blocchi troppo grandi
-                    stations.append({
-                        "Prezzo": float(price_match.group(1)),
-                        "Nome": text.split(price_match.group(1))[0].strip()[:50],
-                        "Indirizzo": "Dettaglio nel sito"
-                    })
+        # Se non ci sono tabelle, cerchiamo in ogni div della pagina
+        if not results:
+            for div in soup.find_all('div'):
+                if len(div.text) < 150: # Evitiamo blocchi di testo enormi
+                    text = div.get_text(" ", strip=True).replace(",", ".")
+                    match = re.search(r'(\d\.\d{3})', text)
+                    if match:
+                        results.append({
+                            "Prezzo": float(match.group(1)),
+                            "Dettaglio": text.replace(match.group(1), "").strip()[:80]
+                        })
 
-        # Rimuove duplicati e ordina
-        if stations:
-            df = pd.DataFrame(stations).drop_duplicates(subset=['Prezzo', 'Nome']).sort_values('Prezzo')
+        if results:
+            df = pd.DataFrame(results).drop_duplicates().sort_values("Prezzo")
             return df, "OK"
         
-        return None, "Nessun distributore trovato nella pagina."
+        return None, "Il sito ha risposto, ma non sono stati trovati prezzi nella pagina."
 
     except Exception as e:
-        return None, str(e)
+        return None, f"Errore di connessione: {e}"
 
-# --- INTERFACCIA UTENTE ---
-st.markdown(f"<h1 style='color: #0056b3; text-align: center;'>⛽ Monitor Prezzi Carburante</h1>", unsafe_allow_html=True)
+# --- INTERFACCIA ---
+st.title("⛽ Prezzi Carburante Online")
 
-# Sidebar per i controlli
 with st.sidebar:
     st.header("Ricerca")
-    citta_scelta = st.text_input("Città", "Caltanissetta")
-    carburante_scelto = st.selectbox("Carburante", ["Gasolio", "Benzina", "GPL", "Metano"])
-    tasto_cerca = st.button("Aggiorna Prezzi")
+    citta = st.text_input("Inserisci Città", "Caltanissetta")
+    tipo = st.selectbox("Carburante", ["Gasolio", "Benzina", "GPL"])
+    btn = st.button("Trova i prezzi più bassi")
 
-if tasto_cerca or citta_scelta:
-    with st.spinner(f"Scansione prezzi per {citta_scelta}..."):
-        df, status = get_fuel_data(citta_scelta, carburante_scelto)
+if btn or citta:
+    with st.spinner("Cerco i prezzi aggiornati..."):
+        df, status = fetch_data(citta, tipo)
         
         if df is not None:
-            st.subheader(f"Risultati per {carburante_scelto} a {citta_scelta}")
+            st.subheader(f"Migliori prezzi per {tipo} a {citta}")
             
-            # Layout a griglia per i prezzi (simile allo screenshot)
+            # Griglia di card (stile app mobile)
             cols = st.columns(2)
-            for i, (_, row) in enumerate(df.head(12).iterrows()):
-                target_col = cols[i % 2]
-                with target_col:
+            for i, (_, row) in enumerate(df.head(10).iterrows()):
+                with cols[i % 2]:
                     st.markdown(f"""
-                    <div style="background: white; padding: 15px; border-radius: 10px; 
-                                border-left: 10px solid #28a745; margin-bottom: 15px; 
-                                box-shadow: 0 4px 6px rgba(0,0,0,0.1); display: flex; 
+                    <div style="background-color: white; padding: 15px; border-radius: 10px; 
+                                border-left: 10px solid #28a745; margin-bottom: 10px; 
+                                box-shadow: 2px 2px 5px rgba(0,0,0,0.1); display: flex; 
                                 justify-content: space-between; align-items: center;">
-                        <div style="flex: 1;">
-                            <b style="font-size: 1.1em; color: #333;">{row['Nome']}</b><br>
-                            <span style="font-size: 0.8em; color: #666;">{row['Indirizzo']}</span>
+                        <div style="color: #333; font-weight: bold; font-size: 0.9em;">
+                            {row['Dettaglio']}
                         </div>
-                        <div style="background: #28a745; color: white; padding: 8px 15px; 
-                                    border-radius: 5px; font-weight: bold; font-size: 1.4em;">
+                        <div style="background: #28a745; color: white; padding: 5px 10px; 
+                                    border-radius: 5px; font-weight: bold; font-size: 1.2em;">
                             {row['Prezzo']:.3f}
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
-            
-            st.success(f"Trovati {len(df)} distributori.")
         else:
-            st.error(f"⚠️ Impossibile recuperare i dati: {status}")
-            st.info("Prova a cercare una città più grande o controlla se il nome è corretto.")
-
-st.markdown("---")
-st.caption("Dati estratti a scopo dimostrativo. Verifica sempre i prezzi al distributore.")
+            st.error(f"⚠️ Attenzione: {status}")
+            st.warning("I server di questo sito potrebbero aver bloccato la richiesta automatica.")
+            st.info("💡 Suggerimento: Prova a scrivere una città diversa (es: Roma o Milano) per vedere se il servizio risponde.")
